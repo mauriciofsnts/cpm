@@ -6,8 +6,10 @@
 //
 // Resolution order for the active profile:
 //  1. $CPM_PROFILE
-//  2. a .claude-profile file in the cwd or any parent directory
-//  3. a directory rule in ~/.config/cpm/dirs (longest matching prefix wins)
+//  2. a .claude-profile file in the cwd or any parent directory (opt-in, cpm use --local)
+//  3. a directory rule in ~/.config/cpm/dirs (longest matching prefix wins);
+//     this is where 'cpm use <name>' records a project by default, so the
+//     project tree itself stays untouched
 //  4. the default profile in ~/.config/cpm/default
 package main
 
@@ -81,8 +83,9 @@ usage:
   cpm add <name> [dir]         register a profile; creates dir if missing, ~/.config/cpm/profiles/<name> if omitted
       --from <profile>         seed settings.json, keybindings, CLAUDE.md, skills/, agents/, commands/ from another profile
   cpm rm <name>                unregister a profile (never deletes the config dir)
-  cpm use <name>               pin profile for this project (writes ./.claude-profile)
-  cpm use <name> --dir [path]  pin profile for a directory tree (default: cwd), stored in ~/.config/cpm/dirs
+  cpm use <name>               pin profile for this project (cwd and below), stored in ~/.config/cpm/dirs
+  cpm use <name> --dir <path>  same, for another directory tree
+  cpm use <name> --local       pin profile by writing ./.claude-profile into the project instead
   cpm use <name> --global      set the default profile
   cpm which                    show the profile resolved for the cwd and where it came from
   cpm dir [name]               print the config dir of a profile (default: active one)
@@ -438,7 +441,7 @@ func remove(args []string) error {
 
 func use(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: cpm use <name> [--global | --dir [path]]")
+		return errors.New("usage: cpm use <name> [--global | --local | --dir [path]]")
 	}
 	name := args[0]
 	if _, err := profileDir(name); err != nil {
@@ -446,7 +449,20 @@ func use(args []string) error {
 	}
 	rest := args[1:]
 	switch {
-	case len(rest) == 0:
+	case len(rest) == 0 || (rest[0] == "--dir" && len(rest) <= 2):
+		p := "."
+		if len(rest) == 2 {
+			p = expandHome(rest[1])
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return err
+		}
+		if err := pinDir(name, abs); err != nil {
+			return err
+		}
+		fmt.Printf("%s/** -> %q (stored in %s)\n", abs, name, dirsFile())
+	case rest[0] == "--local" && len(rest) == 1:
 		if err := os.WriteFile(profileFile, []byte(name+"\n"), 0o644); err != nil {
 			return err
 		}
@@ -460,31 +476,23 @@ func use(args []string) error {
 			return err
 		}
 		fmt.Printf("default profile is now %q\n", name)
-	case rest[0] == "--dir" && len(rest) <= 2:
-		p := "."
-		if len(rest) == 2 {
-			p = expandHome(rest[1])
-		}
-		abs, err := filepath.Abs(p)
-		if err != nil {
-			return err
-		}
-		rules := readDirRules()
-		kept := rules[:0]
-		for _, r := range rules {
-			if r.path != abs {
-				kept = append(kept, r)
-			}
-		}
-		kept = append(kept, dirRule{name, abs})
-		if err := writeDirRules(kept); err != nil {
-			return err
-		}
-		fmt.Printf("%s/** -> %q\n", abs, name)
 	default:
-		return errors.New("usage: cpm use <name> [--global | --dir [path]]")
+		return errors.New("usage: cpm use <name> [--global | --local | --dir [path]]")
 	}
 	return nil
+}
+
+// pinDir records "name abs" in ~/.config/cpm/dirs, replacing any rule for the same path.
+func pinDir(name, abs string) error {
+	rules := readDirRules()
+	kept := rules[:0]
+	for _, r := range rules {
+		if r.path != abs {
+			kept = append(kept, r)
+		}
+	}
+	kept = append(kept, dirRule{name, abs})
+	return writeDirRules(kept)
 }
 
 func which() error {
